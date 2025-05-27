@@ -302,3 +302,4 @@ PYTHONPATH=$(COREPYTHONPATH)
 # _sqlite3 _tkinter _curses pyexpat
 # _codecs_jp _codecs_kr _codecs_tw unicodedata
 cc_module cc_module.c
+#_cryptocap _cryptocapmodule.c

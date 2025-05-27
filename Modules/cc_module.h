@@ -21,29 +21,35 @@ typedef struct cc_dcap {
     uint64_t MAC;
 } cc_dcap;
 
-typedef struct ipc_cap_msg{
-    uint32_t magic; 
-    pid_t pid;       // PID of the writer
-    cc_dcap cap;     // Capability describing the data
-} ipc_cap_msg;
-//#endif	 
+typedef struct {
+    PyObject_HEAD
+    cc_dcap cap;  // Capability structures
+} PyCryptoCapObject;
+
+
+typedef struct {
+    PyObject_HEAD
+    cc_dcap cap;
+    size_t elem_size;  // 1 for bytes
+} CCArrayObject;
+
+typedef struct {
+    PyObject_HEAD
+    PyCryptoCapObject* cap;
+    size_t elem_size;  // 1 for bytes
+} CCRemoteArrayObject;
+
+
 
 // Execute custom instruction (example: 'myinst r0, r1')
-static inline void execute_cc_nop(int arg1, int arg2) {
+static inline void cc_isa_nop(int arg1, int arg2) {
     __asm__ volatile (
         "nop"
     );
 }
 
 #if defined(__aarch64__) || defined(__ARM_ARCH_8A__)
-
-static inline void execute_cc_print_cap(cc_dcap cap) {
-    uint64_t perms = (cap.perms_base & 0xFFFF000000000000) >> 48;
-    uint64_t base = cap.perms_base & 0x0000FFFFFFFFFFFF;
-    printf("cap.perms=0x%lx, .base=0x%lx, .offset=%d, .size=%d, .PT=0x%lx, .MAC=0x%lx\n",
-           perms, base, cap.offset, cap.size, cap.PT, cap.MAC);
-}
-static inline void execute_cc_store_cap_from_CR0(cc_dcap* cap) {
+static inline void cc_isa_store_cap_from_CR0(cc_dcap* cap) {
     __asm__ volatile (
          "mov x9, %0\n\t"
          ".word 0x02100009\n\t"      // stc cr0, [x9]
@@ -52,7 +58,8 @@ static inline void execute_cc_store_cap_from_CR0(cc_dcap* cap) {
          : "x9"
     );
 }
-static inline cc_dcap execute_cc_create_cap(const void* base, size_t offset, size_t size, bool write_flag) {
+
+static inline cc_dcap cc_isa_create_cap(const void* base, size_t offset, size_t size, bool write_flag) {
     cc_dcap cap;
     uint64_t perms = (write_flag) ? WRITE + READ : READ;
     perms = (perms << 48);
@@ -66,10 +73,11 @@ static inline cc_dcap execute_cc_create_cap(const void* base, size_t offset, siz
         : "r" (perms_base), "r" (offset_size)
         : "x9", "x10"
     );
-    execute_cc_store_cap_from_CR0(&cap);
+    cc_isa_store_cap_from_CR0(&cap);
     return cap;
 }    
-static inline void execute_cc_load_ver_cap_to_CR0(cc_dcap* cap) {
+
+static inline void cc_isa_load_ver_cap_to_CR0(cc_dcap* cap) {
     __asm__ volatile (
          "mov x9, %0\n\t"
          ".word 0x02000009\n\t"      // ldc cr0, [x9]
@@ -78,11 +86,11 @@ static inline void execute_cc_load_ver_cap_to_CR0(cc_dcap* cap) {
          : "x9"
     );
 }
-static inline uint8_t* execute_cc_memcpy(void* dst, cc_dcap src, size_t count) {
+static inline uint8_t* cc_isa_load_CR0_memcpy(void* dst, cc_dcap src, size_t count) {
     if (count == 0)
         return (uint8_t*)dst;
     
-    execute_cc_load_ver_cap_to_CR0(&src);
+    cc_isa_load_ver_cap_to_CR0(&src);
 
     __asm__ volatile(
         "mov x10, %[dst_ptr]\n\t"
@@ -103,24 +111,66 @@ static inline uint8_t* execute_cc_memcpy(void* dst, cc_dcap src, size_t count) {
 
     return (uint8_t*)dst;
 }
+
+static inline uint8_t cc_isa_read_i8_via_CR0() {
+    uint8_t data;
+    __asm__ volatile (
+        ".word 0x02200d20\n\t"  // cldg8 x9, [cr0]
+        "and %0, x9, #0xFF\n\t" // Extract least significant byte
+        : "=r" (data)
+        :
+        : "x9", "memory"
+    );
+    return data;
+}
+
+static inline void cc_isa_write_i8_via_CR0(uint8_t data) {
+    __asm__ volatile (
+        "and x9, %0, #0xFF\n\t"
+        ".word 0x02300d20\n\t"  // cstg8 x9, [cr0]
+        :
+        : "r" (data)
+        : "x9"
+    );
+}
+
+static inline uint8_t cc_isa_load_CR0_read_i8_data(cc_dcap cap) {
+    uint8_t data = 0;
+    cc_isa_load_ver_cap_to_CR0(&cap);
+    __asm__ volatile (
+        ".word 0x02200d20\n\t"
+        "and %0, x9, #0xFF\n\t"
+        : "=r" (data)
+        :
+        : "x9", "memory"
+    );
+    return data;
+}
+
+static inline void cc_isa_load_CR0_write_i8_data(cc_dcap cap, uint8_t data) {
+    cc_isa_load_ver_cap_to_CR0(&cap);
+    __asm__ volatile (
+        "and x9, %0, #0xFF\n\t"
+        ".word 0x02300d20\n\t"
+        :
+        : "r" (data)
+        : "x9"
+    );
+}
 #else
-static inline void execute_cc_print_cap(cc_dcap cap) {
+static inline void cc_isa_store_cap_from_CR0(cc_dcap cap) {
     fprintf(stderr, "ARM64 instructions not supported on this platform\n");
     abort();
 }
-static inline void execute_cc_store_cap_from_CR0(cc_dcap cap) {
+static inline cc_dcap cc_isa_create_cap(const void* base, size_t offset, size_t size, bool write_flag) {
     fprintf(stderr, "ARM64 instructions not supported on this platform\n");
     abort();
 }
-static inline cc_dcap execute_cc_create_cap(const void* base, size_t offset, size_t size, bool write_flag) {
+static inline void cc_isa_load_ver_cap_to_CR0(cc_dcap* cap) {
     fprintf(stderr, "ARM64 instructions not supported on this platform\n");
     abort();
 }
-static inline void execute_cc_load_ver_cap_to_CR0(cc_dcap* cap) {
-    fprintf(stderr, "ARM64 instructions not supported on this platform\n");
-    abort();
-}
-static inline uint8_t* execute_cc_memcpy(void* dst, cc_dcap src, size_t count) {
+static inline uint8_t* cc_isa_memcpy(void* dst, cc_dcap src, size_t count) {
     fprintf(stderr, "ARM64 instructions not supported on this platform\n");
     abort();
 }
