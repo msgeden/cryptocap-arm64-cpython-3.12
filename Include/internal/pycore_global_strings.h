@@ -622,6 +622,7 @@ struct _Py_global_strings {
         STRUCT_FOR_ID(rel_tol)
         STRUCT_FOR_ID(release)
         STRUCT_FOR_ID(reload)
+        STRUCT_FOR_ID(remote)
         STRUCT_FOR_ID(repl)
         STRUCT_FOR_ID(replace)
         STRUCT_FOR_ID(reserved)

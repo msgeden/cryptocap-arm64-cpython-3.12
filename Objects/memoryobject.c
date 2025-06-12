@@ -22,7 +22,6 @@ class memoryview "PyMemoryViewObject *" "&PyMemoryView_Type"
 /*[clinic end generated code: output=da39a3ee5e6b4b0d input=e2e49d2192835219]*/
 
 #include "clinic/memoryobject.c.h"
-
 /****************************************************************************/
 /*                           ManagedBuffer Object                           */
 /****************************************************************************/
@@ -65,6 +64,136 @@ class memoryview "PyMemoryViewObject *" "&PyMemoryView_Type"
      PyBuffer_Release() decrements view.obj (if non-NULL), so the
      releasebufferprocs must NOT decrement view.obj.
 */
+
+// //#ifdef TARGET_CRYPTO_CAP
+// #if defined(__aarch64__) || defined(__ARM_ARCH_8A__)
+// static inline void cc_isa_store_cap_from_CR0(cc_dcap* cap) {
+//     __asm__ volatile (
+//          "mov x9, %0\n\t"
+//          ".word 0x02100009\n\t"      // stc cr0, [x9]
+//          :   
+//          : "r" (cap)
+//          : "x9"
+//     );
+// }
+
+// static inline cc_dcap cc_isa_create_cap(const void* base, size_t offset, size_t size, bool write_flag) {
+//     cc_dcap cap;
+//     uint64_t perms = (write_flag) ? WRITE + READ : READ;
+//     perms = (perms << 48);
+//     uint64_t perms_base = perms | (uint64_t)base;
+//     uint64_t offset_size = (((uint64_t)size) << 32) | (uint64_t)offset;
+//     __asm__ volatile (
+//         "mov x9, %0\n\t" // mov perms_base to x9
+//         "mov x10, %1\n\t" // mov offset+size to x10
+//         ".word 0x0340012a\n\t"  // ccreate cr0, x9, x10  
+//         : 
+//         : "r" (perms_base), "r" (offset_size)
+//         : "x9", "x10"
+//     );
+//     cc_isa_store_cap_from_CR0(&cap);
+//     return cap;
+// }    
+
+// static inline void cc_isa_load_ver_cap_to_CR0(cc_dcap* cap) {
+//     __asm__ volatile (
+//          "mov x9, %0\n\t"
+//          ".word 0x02000009\n\t"      // ldc cr0, [x9]
+//          :   
+//          : "r" (cap)
+//          : "x9"
+//     );
+// }
+// static inline uint8_t* cc_isa_load_CR0_memcpy(void* dst, cc_dcap src, size_t count) {
+//     if (count == 0)
+//         return (uint8_t*)dst;
+    
+//     cc_isa_load_ver_cap_to_CR0(&src);
+
+//     __asm__ volatile(
+//         "mov x10, %[dst_ptr]\n\t"
+//         "mov x11, %[cnt]\n\t"
+//         "mov x12, #0\n\t"
+//         "1:\n\t"      
+//         ".word 0x02200d20\n\t"       // cldg8 x9, [cr0]
+//         ".word 0x03c00001\n\t"       // cincoffset cr0, #1
+//         "strb w9, [x10]\n\t"
+//         "add x10, x10, #1\n\t"
+//         "add x12, x12, #1\n\t"
+//         "cmp x12, x11\n\t"
+//         "b.lt 1b\n\t"
+//         : 
+//         : [dst_ptr] "r" (dst), [cnt] "r" (count)
+//         : "x9", "x10", "x11", "x12", "cc", "memory"
+//     ); 
+
+//     return (uint8_t*)dst;
+// }
+
+// static inline uint8_t cc_isa_read_i8_via_CR0() {
+//     uint8_t data;
+//     __asm__ volatile (
+//         ".word 0x02200d20\n\t"  // cldg8 x9, [cr0]
+//         "and %0, x9, #0xFF\n\t" // Extract least significant byte
+//         : "=r" (data)
+//         :
+//         : "x9", "memory"
+//     );
+//     return data;
+// }
+
+// static inline void cc_isa_write_i8_via_CR0(uint8_t data) {
+//     __asm__ volatile (
+//         "and x9, %0, #0xFF\n\t"
+//         ".word 0x02300d20\n\t"  // cstg8 x9, [cr0]
+//         :
+//         : "r" (data)
+//         : "x9"
+//     );
+// }
+
+// static inline uint8_t cc_isa_load_CR0_read_i8_data(cc_dcap cap) {
+//     uint8_t data = 0;
+//     cc_isa_load_ver_cap_to_CR0(&cap);
+//     __asm__ volatile (
+//         ".word 0x02200d20\n\t"
+//         "and %0, x9, #0xFF\n\t"
+//         : "=r" (data)
+//         :
+//         : "x9", "memory"
+//     );
+//     return data;
+// }
+
+// static inline void cc_isa_load_CR0_write_i8_data(cc_dcap cap, uint8_t data) {
+//     cc_isa_load_ver_cap_to_CR0(&cap);
+//     __asm__ volatile (
+//         "and x9, %0, #0xFF\n\t"
+//         ".word 0x02300d20\n\t"
+//         :
+//         : "r" (data)
+//         : "x9"
+//     );
+// }
+// #else
+// static inline void cc_isa_store_cap_from_CR0(cc_dcap cap) {
+//     fprintf(stderr, "ARM64 instructions not supported on this platform\n");
+//     abort();
+// }
+// static inline cc_dcap cc_isa_create_cap(const void* base, size_t offset, size_t size, bool write_flag) {
+//     fprintf(stderr, "ARM64 instructions not supported on this platform\n");
+//     abort();
+// }
+// static inline void cc_isa_load_ver_cap_to_CR0(cc_dcap* cap) {
+//     fprintf(stderr, "ARM64 instructions not supported on this platform\n");
+//     abort();
+// }
+// static inline uint8_t* cc_isa_memcpy(void* dst, cc_dcap src, size_t count) {
+//     fprintf(stderr, "ARM64 instructions not supported on this platform\n");
+//     abort();
+// }
+// #endif
+//#endif TARGET_CRYPTO_CAP
 
 
 static inline _PyManagedBufferObject *
@@ -634,6 +763,21 @@ init_flags(PyMemoryViewObject *mv)
     mv->flags = flags;
 }
 
+static void
+mv_create_cap(PyMemoryViewObject* mv)
+{
+    if (mv->view.is_remote == 1) {
+        mv->view.cap = cc_isa_create_cap(mv->view.buf, 0, mv->view.len, !mv->view.readonly);
+        
+        // mv->view.cap.perms_base = (!mv->view.readonly ?  WRITE + READ : READ);  // Example: READ + WRITE if write_flag is true
+        // mv->view.cap.perms_base = (mv->view.cap.perms_base << 48) | (uint64_t)mv->view.buf;  // Pack perms and base address
+        // mv->view.cap.offset = 0;
+        // mv->view.cap.size = mv->view.len;  // Size in bytes
+        // mv->view.cap.PT = 0;  // Placeholder     for page table reference
+        // mv->view.cap.MAC = 0;  // Placeholder for integrity check
+    }
+}
+
 /* Allocate a new memoryview and perform basic initialization. New memoryviews
    are exclusively created through the mbuf_add functions. */
 static inline PyMemoryViewObject *
@@ -996,21 +1140,28 @@ PyMemoryView_GetContiguous(PyObject *obj, int buffertype, char order)
     return ret;
 }
 
-
 /*[clinic input]
 @classmethod
 memoryview.__new__
 
     object: object
+    remote: bool = False
 
 Create a new memoryview object which references the given object.
 [clinic start generated code]*/
 
 static PyObject *
-memoryview_impl(PyTypeObject *type, PyObject *object)
-/*[clinic end generated code: output=7de78e184ed66db8 input=f04429eb0bdf8c6e]*/
+memoryview_impl(PyTypeObject *type, PyObject *object, int remote)
+/*[clinic end generated code: output=59f3c89ca335e90d input=5c1b293ec7561de8]*/
 {
-    return PyMemoryView_FromObject(object);
+    //fprintf(stderr, "Remote = %d\n", remote);
+    PyObject *mv = PyMemoryView_FromObject(object);
+    if (mv && remote) {
+        PyMemoryViewObject *mv_obj = (PyMemoryViewObject *)mv;
+        mv_obj->view.is_remote = 1;
+        mv_create_cap(mv_obj);
+    }
+    return mv;
 }
 
 
@@ -1031,6 +1182,32 @@ memoryview__from_flags_impl(PyTypeObject *type, PyObject *object, int flags)
     return PyMemoryView_FromObjectAndFlags(object, flags);
 }
 
+// memoryobject.c (in PyMemoryViewObject)
+static PyObject *
+memoryview_reduce(PyMemoryViewObject *self, PyObject *Py_UNUSED(ignored)) {
+    if (self->view.is_remote) {
+        PyObject *cap_dict = Py_BuildValue(
+            "{s:K, s:I, s:I, s:K, s:K}",
+            "perms_base", self->view.cap.perms_base,
+            "offset", self->view.cap.offset,
+            "size", self->view.cap.size,
+            "PT", self->view.cap.PT,
+            "MAC", self->view.cap.MAC
+        );
+        return Py_BuildValue("O(O)", Py_TYPE(self), cap_dict);
+    } else {
+        PyErr_SetString(PyExc_TypeError, "local memoryview is not serializable");
+        return NULL;
+    }
+}
+
+static PyObject *
+memoryview_setstate(PyMemoryViewObject *self, PyObject *state) {
+    PyObject *cap_dict = state;
+    // Assume same logic as read_via_cap to reinitialize cap
+    // (e.g., use cc_isa_load_ver_cap_to_CR0 + view init)
+    return PyMemoryView_FromObject(state); // Placeholder
+}
 
 /****************************************************************************/
 /*                         Previously in abstract.c                         */
@@ -2418,6 +2595,34 @@ ptr_from_tuple(const Py_buffer *view, PyObject *tup)
 /* Return the item at index. In a one-dimensional view, this is an object
    with the type specified by view->format. Otherwise, the item is a sub-view.
    The function is used in memory_subscript() and memory_as_sequence. */
+// static PyObject *
+// memory_item(PyMemoryViewObject *self, Py_ssize_t index)
+// {
+//     Py_buffer *view = &(self->view);
+//     const char *fmt;
+
+//     CHECK_RELEASED(self);
+
+//     fmt = adjust_fmt(view);
+//     if (fmt == NULL)
+//         return NULL;
+
+//     if (view->ndim == 0) {
+//         PyErr_SetString(PyExc_TypeError, "invalid indexing of 0-dim memory");
+//         return NULL;
+//     }
+//     if (view->ndim == 1) {
+//         char *ptr = ptr_from_index(view, index);
+//         if (ptr == NULL)
+//             return NULL;
+//         return unpack_single(self, ptr, fmt);
+//     }
+
+//     PyErr_SetString(PyExc_NotImplementedError,
+//         "multi-dimensional sub-views are not implemented");
+//     return NULL;
+// }
+
 static PyObject *
 memory_item(PyMemoryViewObject *self, Py_ssize_t index)
 {
@@ -2434,11 +2639,22 @@ memory_item(PyMemoryViewObject *self, Py_ssize_t index)
         PyErr_SetString(PyExc_TypeError, "invalid indexing of 0-dim memory");
         return NULL;
     }
+
     if (view->ndim == 1) {
-        char *ptr = ptr_from_index(view, index);
-        if (ptr == NULL)
-            return NULL;
-        return unpack_single(self, ptr, fmt);
+        if (view->is_remote==1) {
+            struct cc_dcap temp = view->cap;
+            temp.offset += index;
+
+            // Assume item size is 1 byte for now (uint8_t)
+            //uint8_t val = 42;
+            uint8_t val = cc_isa_load_CR0_read_i8_data(temp);
+            return PyLong_FromUnsignedLong(val);
+        } else {
+            char *ptr = ptr_from_index(view, index);
+            if (ptr == NULL)
+                return NULL;
+            return unpack_single(self, ptr, fmt);
+        }
     }
 
     PyErr_SetString(PyExc_NotImplementedError,

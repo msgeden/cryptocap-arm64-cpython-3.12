@@ -25,7 +25,7 @@ static PyObject* py_cc_create_cap(PyObject* self, PyObject* args) {
     }
     
     // Create capability
-    cc_dcap cap = cc_isa_create_cap((void*)base_addr, offset, size, (bool)write_flag);
+    cc_dcap cap = cc_isa_create_cap((void*)base_addr, offset, size, write_flag);
     
     // cc_dcap cap;
     // cap.perms_base = (write_flag ?  WRITE + READ : READ);  // Example: READ + WRITE if write_flag is true

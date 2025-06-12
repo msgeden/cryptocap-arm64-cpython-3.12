@@ -1128,6 +1128,7 @@ extern "C" {
     INIT_ID(rel_tol), \
     INIT_ID(release), \
     INIT_ID(reload), \
+    INIT_ID(remote), \
     INIT_ID(repl), \
     INIT_ID(replace), \
     INIT_ID(reserved), \

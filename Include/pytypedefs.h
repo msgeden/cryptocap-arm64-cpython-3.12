@@ -24,6 +24,22 @@ typedef struct _frame PyFrameObject;
 typedef struct _ts PyThreadState;
 typedef struct _is PyInterpreterState;
 
+
+typedef enum capPermFlags {
+    READ = 1,
+    WRITE = 2,
+    EXEC = 4,
+    TRANS = 8,
+} capPermFlagsType;
+
+typedef struct cc_dcap {
+    uint64_t perms_base;
+    uint32_t offset;
+    uint32_t size;
+    uint64_t PT;
+    uint64_t MAC;
+} cc_dcap;
+
 #ifdef __cplusplus
 }
 #endif

@@ -1,23 +1,23 @@
+import struct
 import cc_module
 import sys
 import ctypes
+from ctypes import create_string_buffer, addressof
 
+var = 42
+cap_int = cc_module.create_cap(var, id(var), 0, 4, False)  # Will store type_name = "int"
+print(f"created cap_int: {cap_int}")    
+obj_int = cc_module.read_via_cap(cap_int)
+print(obj_int + 10)  # Should print 52
 
+# s = create_string_buffer(b"hello world")
+# print(s.value.decode())  # b'hello world\x00'
+# addr = addressof(s)
+# cap_str = cc_module.create_cap(s, addr, 0, len(s.value), True)
+# cap_str["type_name"] = "str"  # <-- Fix here
+# print(f"created cap_str: {cap_str}")    
 
-# Allocate a mutable byte
-buf = (ctypes.c_uint8 * 2)()
-buf[0] = 63
-addr = ctypes.addressof(buf)
-
-cap = cc_module.create_cap(addr, 0, 5, True)
-print(f"created capability: {cap}")
-
-print("original value:", buf[0])
-val = cc_module.read_i8_via_CR0()
-print("pre-write value:", val)
-cc_module.write_i8_via_CR0(66)
-print("post-write value:", buf[0])  # should reflect the write
-
-arr = cc_module.CCArray(cap)
-print("arr-length:", len(arr))
-print("arr-first byte:", arr[0])
+# # Receiver side: read it back using the cap
+# restored = cc_module.read_via_cap(cap_str)
+# print(restored)
+# print(f"Message received: {restored}")
