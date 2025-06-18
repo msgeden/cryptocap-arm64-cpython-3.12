@@ -16,24 +16,6 @@ extern "C" {
  * break the ABI.
  *
  */
-//#ifdef TARGET_CRYPTO_CAP
-// typedef enum capPermFlags {
-//     READ = 1,
-//     WRITE = 2,
-//     EXEC = 4,
-//     TRANS = 8,
-// } capPermFlagsType;
-
-// typedef struct cc_dcap {
-//     uint64_t perms_base;
-//     uint32_t offset;
-//     uint32_t size;
-//     uint64_t PT;
-//     uint64_t MAC;
-//     //const char* type_name; // Type name for debugging
-// } cc_dcap;
-//#endif /* TARGET_CRYPTO_CAP */    
-
 typedef struct {
     void *buf;
     PyObject *obj;        /* owned reference */

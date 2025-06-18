@@ -64,6 +64,7 @@ class memoryview "PyMemoryViewObject *" "&PyMemoryView_Type"
      PyBuffer_Release() decrements view.obj (if non-NULL), so the
      releasebufferprocs must NOT decrement view.obj.
 */
+static char dummy_buffer[1024];  // Safe static size, or dynamically allocate if needed
 
 static inline _PyManagedBufferObject *
 mbuf_alloc(void)
@@ -1009,6 +1010,61 @@ PyMemoryView_GetContiguous(PyObject *obj, int buffertype, char order)
     return ret;
 }
 
+
+static int
+apply_remote_setup(PyMemoryViewObject *self, PyObject *cap_dict)
+{
+    if (!PyDict_Check(cap_dict)) {
+        PyErr_SetString(PyExc_TypeError, "cap_dict must be a dictionary");
+        return -1;
+    }
+
+    cc_dcap cap;
+    cap.perms_base = PyLong_AsUnsignedLongLong(PyDict_GetItemString(cap_dict, "perms_base"));
+    cap.offset = PyLong_AsUnsignedLong(PyDict_GetItemString(cap_dict, "offset"));
+    cap.size = PyLong_AsUnsignedLong(PyDict_GetItemString(cap_dict, "size"));
+    cap.PT = PyLong_AsUnsignedLongLong(PyDict_GetItemString(cap_dict, "PT"));
+    cap.MAC = PyLong_AsUnsignedLongLong(PyDict_GetItemString(cap_dict, "MAC"));
+
+    if (PyErr_Occurred())
+        return -1;
+
+    self->view.is_remote = 1;
+    self->view.cap = cap;
+    //static char dummy_buffer[1024];  // or dynamically allocate based on cap.size
+    Py_buffer *view = &self->view;
+    //view->buf = NULL;
+    if (cap.size > sizeof(dummy_buffer)) {
+        PyErr_SetString(PyExc_ValueError, "Requested buffer too large");
+        return -1;
+    }
+    view->buf = dummy_buffer;
+
+    view->len = cap.size;
+    view->readonly = ((cap.perms_base >> 48) & WRITE) ? 0 : 1;
+
+    view->itemsize = 1;
+    view->ndim = 1;
+
+    // Use stack variables for shape and stride, but copy them into ob_array
+    self->ob_array[0] = cap.size;    // shape
+    self->ob_array[1] = 1;           // stride
+
+    view->shape = &self->ob_array[0];
+    view->strides = &self->ob_array[1];
+    view->suboffsets = NULL;
+    view->format = "B";
+    view->internal = NULL;
+
+    view->obj = (PyObject *)self;
+    Py_INCREF(self);
+
+    self->mbuf = NULL;  // no managed buffer
+    init_flags(self);
+
+    return 0;
+}
+
 /*[clinic input]
 @classmethod
 memoryview.__new__
@@ -1023,6 +1079,20 @@ static PyObject *
 memoryview_impl(PyTypeObject *type, PyObject *object, int remote)
 /*[clinic end generated code: output=59f3c89ca335e90d input=5c1b293ec7561de8]*/
 {
+      // If 'object' is a dict, assume it's a deserialized cap and apply setup
+    if (PyDict_Check(object)) {
+        PyMemoryViewObject *mv = memory_alloc(1);  // 1D view
+        if (!mv) return NULL;
+
+        if (apply_remote_setup(mv, object) < 0) {
+            Py_DECREF(mv);
+            return NULL;
+        }
+
+        init_flags(mv);  // initialize buffer flags
+        return (PyObject *)mv;
+    }
+
     //fprintf(stderr, "Remote = %d\n", remote);
     PyObject *mv = PyMemoryView_FromObject(object);
     if (mv && remote) {
@@ -1051,32 +1121,45 @@ memoryview__from_flags_impl(PyTypeObject *type, PyObject *object, int flags)
     return PyMemoryView_FromObjectAndFlags(object, flags);
 }
 
-// memoryobject.c (in PyMemoryViewObject)
+//serilisation for pickle
 static PyObject *
-memoryview_reduce(PyMemoryViewObject *self, PyObject *Py_UNUSED(ignored)) {
-    if (self->view.is_remote) {
-        PyObject *cap_dict = Py_BuildValue(
-            "{s:K, s:I, s:I, s:K, s:K}",
-            "perms_base", self->view.cap.perms_base,
-            "offset", self->view.cap.offset,
-            "size", self->view.cap.size,
-            "PT", self->view.cap.PT,
-            "MAC", self->view.cap.MAC
-        );
-        return Py_BuildValue("O(O)", Py_TYPE(self), cap_dict);
-    } else {
-        PyErr_SetString(PyExc_TypeError, "local memoryview is not serializable");
+memoryview_reduce(PyMemoryViewObject *self, PyObject *Py_UNUSED(ignored))
+{
+    if (!self->view.is_remote) {
+        PyErr_SetString(PyExc_TypeError,
+                        "cannot pickle local memoryview");
         return NULL;
     }
+    PyObject *cap = Py_BuildValue(
+        "{s:K,s:I,s:I,s:K,s:K}",
+        "perms_base", self->view.cap.perms_base,
+        "offset", self->view.cap.offset,
+        "size", self->view.cap.size,
+        "PT", self->view.cap.PT,
+        "MAC", self->view.cap.MAC
+    );
+    //no serialisation for local objects
+    if (!cap) return NULL;
+    // Use class for constructor
+    return Py_BuildValue("O(O)", Py_TYPE(self), cap);
 }
 
 static PyObject *
-memoryview_setstate(PyMemoryViewObject *self, PyObject *state) {
-    PyObject *cap_dict = state;
-    // Assume same logic as read_via_cap to reinitialize cap
-    // (e.g., use cc_isa_load_ver_cap_to_CR0 + view init)
-    return PyMemoryView_FromObject(state); // Placeholder
+memoryview_setstate(PyMemoryViewObject *self, PyObject *state)
+{
+    // state is the cap dict
+    PyObject *cap = state;
+    if (!PyDict_Check(cap)) {
+        PyErr_SetString(PyExc_TypeError, "invalid state for memoryview");
+        return NULL;
+    }
+    // Use your existing cap-to-memoryview loader
+    if (apply_remote_setup(self, cap) < 0) {  // implement this
+        return NULL;
+    }
+    Py_RETURN_NONE;
 }
+
 
 /****************************************************************************/
 /*                         Previously in abstract.c                         */
@@ -1127,7 +1210,6 @@ PyBuffer_ToContiguous(void *buf, const Py_buffer *src, Py_ssize_t len, char orde
     PyMem_Free(fb);
     return ret;
 }
-
 
 /****************************************************************************/
 /*                           Release/GC management                          */
@@ -2464,34 +2546,6 @@ ptr_from_tuple(const Py_buffer *view, PyObject *tup)
 /* Return the item at index. In a one-dimensional view, this is an object
    with the type specified by view->format. Otherwise, the item is a sub-view.
    The function is used in memory_subscript() and memory_as_sequence. */
-// static PyObject *
-// memory_item(PyMemoryViewObject *self, Py_ssize_t index)
-// {
-//     Py_buffer *view = &(self->view);
-//     const char *fmt;
-
-//     CHECK_RELEASED(self);
-
-//     fmt = adjust_fmt(view);
-//     if (fmt == NULL)
-//         return NULL;
-
-//     if (view->ndim == 0) {
-//         PyErr_SetString(PyExc_TypeError, "invalid indexing of 0-dim memory");
-//         return NULL;
-//     }
-//     if (view->ndim == 1) {
-//         char *ptr = ptr_from_index(view, index);
-//         if (ptr == NULL)
-//             return NULL;
-//         return unpack_single(self, ptr, fmt);
-//     }
-
-//     PyErr_SetString(PyExc_NotImplementedError,
-//         "multi-dimensional sub-views are not implemented");
-//     return NULL;
-// }
-
 static PyObject *
 memory_item(PyMemoryViewObject *self, Py_ssize_t index)
 {
@@ -2513,8 +2567,41 @@ memory_item(PyMemoryViewObject *self, Py_ssize_t index)
         if (view->is_remote==1) {
             struct cc_dcap temp = view->cap;
             temp.offset += index;
-
             // Assume item size is 1 byte for now (uint8_t)
+            // fprintf(stderr,
+            //     "[DEBUG] memory_item:\n"
+            //     "  index        = %zd\n"
+            //     "  is_remote    = %d\n"
+            //     "  buf          = %p\n"
+            //     "  len          = %zd\n"
+            //     "  itemsize     = %zd\n"
+            //     "  readonly     = %d\n"
+            //     "  ndim         = %d\n"
+            //     "  format       = %s\n"
+            //     "  shape[0]     = %zd\n"
+            //     "  strides[0]   = %zd\n"
+            //     "  cap:\n"
+            //     "    perms_base = 0x%lx\n"
+            //     "    offset     = %u\n"
+            //     "    size       = %u\n"
+            //     "    PT         = 0x%lx\n"
+            //     "    MAC        = 0x%lx\n",
+            //     index,
+            //     view->is_remote,
+            //     view->buf,
+            //     view->len,
+            //     view->itemsize,
+            //     view->readonly,
+            //     view->ndim,
+            //     view->format ? view->format : "(null)",
+            //     view->shape ? view->shape[0] : -1,
+            //     view->strides ? view->strides[0] : -1,
+            //     view->cap.perms_base,
+            //     view->cap.offset,
+            //     view->cap.size,
+            //     view->cap.PT,
+            //     view->cap.MAC
+            // );
             //uint8_t val = 42;
             uint8_t val = cc_isa_load_CR0_read_i8_data(temp);
             return PyLong_FromUnsignedLong(val);
@@ -2631,9 +2718,41 @@ is_multiindex(PyObject *key)
 static PyObject *
 memory_subscript(PyMemoryViewObject *self, PyObject *key)
 {
-    Py_buffer *view;
-    view = &(self->view);
+    Py_buffer *view = &(self->view);
 
+    // === Remote override (must be before CHECK_RELEASED) ===
+    if (view->is_remote == 1) {
+        if (_PyIndex_Check(key)) {
+            Py_ssize_t index = PyNumber_AsSsize_t(key, PyExc_IndexError);
+            if (index == -1 && PyErr_Occurred())
+                return NULL;
+
+            // fprintf(stderr,
+            //     "[DEBUG] remote memory_subscript index = %zd\n"
+            //     "  cap.offset = %u, cap.size = %u, cap.perms_base = 0x%lx\n",
+            //     index,
+            //     view->cap.offset,
+            //     view->cap.size,
+            //     view->cap.perms_base
+            // );
+
+            if (index < 0 || index >= view->cap.size) {
+                PyErr_SetString(PyExc_IndexError, "Remote memoryview index out of range");
+                return NULL;
+            }
+
+            cc_dcap temp = view->cap;
+            temp.offset += index;
+            //uint8_t val = 42;
+            uint8_t val = cc_isa_load_CR0_read_i8_data(temp);
+            return PyLong_FromUnsignedLong(val);
+        } else {
+            PyErr_SetString(PyExc_TypeError, "Remote memoryview only supports integer indexing");
+            return NULL;
+        }
+    }
+
+    // === Local fallback (normal memoryview) ===
     CHECK_RELEASED(self);
 
     if (view->ndim == 0) {
@@ -2642,29 +2761,24 @@ memory_subscript(PyMemoryViewObject *self, PyObject *key)
             if (fmt == NULL)
                 return NULL;
             return unpack_single(self, view->buf, fmt);
-        }
-        else if (key == Py_Ellipsis) {
+        } else if (key == Py_Ellipsis) {
             return Py_NewRef(self);
-        }
-        else {
-            PyErr_SetString(PyExc_TypeError,
-                "invalid indexing of 0-dim memory");
+        } else {
+            PyErr_SetString(PyExc_TypeError, "invalid indexing of 0-dim memory");
             return NULL;
         }
     }
 
     if (_PyIndex_Check(key)) {
-        Py_ssize_t index;
-        index = PyNumber_AsSsize_t(key, PyExc_IndexError);
+        Py_ssize_t index = PyNumber_AsSsize_t(key, PyExc_IndexError);
         if (index == -1 && PyErr_Occurred())
             return NULL;
         return memory_item(self, index);
     }
-    else if (PySlice_Check(key)) {
-        CHECK_RESTRICTED(self);
-        PyMemoryViewObject *sliced;
 
-        sliced = (PyMemoryViewObject *)mbuf_add_view(self->mbuf, view);
+    if (PySlice_Check(key)) {
+        CHECK_RESTRICTED(self);
+        PyMemoryViewObject *sliced = (PyMemoryViewObject *)mbuf_add_view(self->mbuf, view);
         if (sliced == NULL)
             return NULL;
 
@@ -2677,18 +2791,20 @@ memory_subscript(PyMemoryViewObject *self, PyObject *key)
 
         return (PyObject *)sliced;
     }
-    else if (is_multiindex(key)) {
+
+    if (is_multiindex(key)) {
         return memory_item_multi(self, key);
     }
-    else if (is_multislice(key)) {
-        PyErr_SetString(PyExc_NotImplementedError,
-            "multi-dimensional slicing is not implemented");
+
+    if (is_multislice(key)) {
+        PyErr_SetString(PyExc_NotImplementedError, "multi-dimensional slicing not implemented");
         return NULL;
     }
 
     PyErr_SetString(PyExc_TypeError, "memoryview: invalid slice key");
     return NULL;
 }
+
 
 static int
 memory_ass_sub(PyMemoryViewObject *self, PyObject *key, PyObject *value)
@@ -2795,11 +2911,16 @@ memory_ass_sub(PyMemoryViewObject *self, PyObject *key, PyObject *value)
 static Py_ssize_t
 memory_length(PyMemoryViewObject *self)
 {
-    CHECK_RELEASED_INT(self);
-    if (self->view.ndim == 0) {
-        PyErr_SetString(PyExc_TypeError, "0-dim memory has no length");
+   if (self->view.ndim == 0) {
+        PyErr_SetString(PyExc_TypeError, "len() of unsized object");
         return -1;
     }
+
+    if (self->view.is_remote == 1) {
+        // Use remote capability size instead of shape[]
+        return self->view.cap.size;
+    }
+
     return self->view.shape[0];
 }
 
@@ -3341,6 +3462,8 @@ static PyMethodDef memory_methods[] = {
     MEMORYVIEW__FROM_FLAGS_METHODDEF
     {"__enter__",   memory_enter, METH_NOARGS, NULL},
     {"__exit__",    memory_exit, METH_VARARGS, NULL},
+    {"__reduce__", (PyCFunction)memoryview_reduce, METH_NOARGS, NULL},
+    
     {NULL,          NULL}
 };
 
@@ -3451,10 +3574,52 @@ PyTypeObject _PyMemoryIter_Type = {
     .tp_iternext = (iternextfunc)memoryiter_next,
 };
 
+// PyTypeObject PyMemoryView_Type = {
+//     PyVarObject_HEAD_INIT(&PyType_Type, 0)
+//     "memoryview",                             /* tp_name */
+//     offsetof(PyMemoryViewObject, ob_array),   /* tp_basicsize */
+//     sizeof(Py_ssize_t),                       /* tp_itemsize */
+//     (destructor)memory_dealloc,               /* tp_dealloc */
+//     0,                                        /* tp_vectorcall_offset */
+//     0,                                        /* tp_getattr */
+//     0,                                        /* tp_setattr */
+//     0,                                        /* tp_as_async */
+//     (reprfunc)memory_repr,                    /* tp_repr */
+//     0,                                        /* tp_as_number */
+//     &memory_as_sequence,                      /* tp_as_sequence */
+//     &memory_as_mapping,                       /* tp_as_mapping */
+//     (hashfunc)memory_hash,                    /* tp_hash */
+//     0,                                        /* tp_call */
+//     0,                                        /* tp_str */
+//     PyObject_GenericGetAttr,                  /* tp_getattro */
+//     0,                                        /* tp_setattro */
+//     &memory_as_buffer,                        /* tp_as_buffer */
+//     Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC |
+//        Py_TPFLAGS_SEQUENCE,                   /* tp_flags */
+//     memoryview__doc__,                        /* tp_doc */
+//     (traverseproc)memory_traverse,            /* tp_traverse */
+//     (inquiry)memory_clear,                    /* tp_clear */
+//     memory_richcompare,                       /* tp_richcompare */
+//     offsetof(PyMemoryViewObject, weakreflist),/* tp_weaklistoffset */
+//     memory_iter,                              /* tp_iter */
+//     0,                                        /* tp_iternext */
+//     memory_methods,                           /* tp_methods */
+//     0,                                        /* tp_members */
+//     memory_getsetlist,                        /* tp_getset */
+//     0,                                        /* tp_base */
+//     0,                                        /* tp_dict */
+//     0,                                        /* tp_descr_get */
+//     0,                                        /* tp_descr_set */
+//     0,                                        /* tp_dictoffset */
+//     0,                                        /* tp_init */
+//     0,                                        /* tp_alloc */
+//     memoryview,                               /* tp_new */
+// };
+
 PyTypeObject PyMemoryView_Type = {
     PyVarObject_HEAD_INIT(&PyType_Type, 0)
     "memoryview",                             /* tp_name */
-    offsetof(PyMemoryViewObject, ob_array),   /* tp_basicsize */
+    sizeof(PyMemoryViewObject),             /* tp_basicsize */
     sizeof(Py_ssize_t),                       /* tp_itemsize */
     (destructor)memory_dealloc,               /* tp_dealloc */
     0,                                        /* tp_vectorcall_offset */
