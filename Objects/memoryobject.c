@@ -1026,6 +1026,9 @@ apply_remote_setup(PyMemoryViewObject *self, PyObject *cap_dict)
     cap.PT = PyLong_AsUnsignedLongLong(PyDict_GetItemString(cap_dict, "PT"));
     cap.MAC = PyLong_AsUnsignedLongLong(PyDict_GetItemString(cap_dict, "MAC"));
 
+    fprintf(stderr, "[DEBUG] apply_remote_setup: size=%d offset=%d\n", cap.size, cap.offset);
+
+
     if (PyErr_Occurred())
         return -1;
 
@@ -1041,7 +1044,7 @@ apply_remote_setup(PyMemoryViewObject *self, PyObject *cap_dict)
     view->buf = dummy_buffer;
 
     view->len = cap.size;
-    view->readonly = ((cap.perms_base >> 48) & WRITE) ? 0 : 1;
+    //view->readonly = ((cap.perms_base >> 48) & WRITE) ? 0 : 1;
 
     view->itemsize = 1;
     view->ndim = 1;
@@ -1071,13 +1074,14 @@ memoryview.__new__
 
     object: object
     remote: bool = False
+    write: bool = False
 
 Create a new memoryview object which references the given object.
 [clinic start generated code]*/
 
 static PyObject *
-memoryview_impl(PyTypeObject *type, PyObject *object, int remote)
-/*[clinic end generated code: output=59f3c89ca335e90d input=5c1b293ec7561de8]*/
+memoryview_impl(PyTypeObject *type, PyObject *object, int remote, int write)
+/*[clinic end generated code: output=325a61d9411793cd input=54bff0e3f5af3023]*/
 {
       // If 'object' is a dict, assume it's a deserialized cap and apply setup
     if (PyDict_Check(object)) {
@@ -1090,6 +1094,7 @@ memoryview_impl(PyTypeObject *type, PyObject *object, int remote)
         }
 
         init_flags(mv);  // initialize buffer flags
+        
         return (PyObject *)mv;
     }
 
@@ -1098,6 +1103,7 @@ memoryview_impl(PyTypeObject *type, PyObject *object, int remote)
     if (mv && remote) {
         PyMemoryViewObject *mv_obj = (PyMemoryViewObject *)mv;
         mv_obj->view.is_remote = 1;
+        mv_obj->view.readonly = !write;
         mv_create_cap(mv_obj);
     }
     return mv;
@@ -1125,7 +1131,7 @@ memoryview__from_flags_impl(PyTypeObject *type, PyObject *object, int flags)
 static PyObject *
 memoryview_reduce(PyMemoryViewObject *self, PyObject *Py_UNUSED(ignored))
 {
-    if (!self->view.is_remote) {
+    if (!self->view.is_remote==1) {
         PyErr_SetString(PyExc_TypeError,
                         "cannot pickle local memoryview");
         return NULL;
@@ -1138,6 +1144,9 @@ memoryview_reduce(PyMemoryViewObject *self, PyObject *Py_UNUSED(ignored))
         "PT", self->view.cap.PT,
         "MAC", self->view.cap.MAC
     );
+
+    fprintf(stderr, "[DEBUG] __reduce__: size=%u, offset=%u\n", self->view.cap.size, self->view.cap.offset);
+
     //no serialisation for local objects
     if (!cap) return NULL;
     // Use class for constructor
@@ -1147,13 +1156,17 @@ memoryview_reduce(PyMemoryViewObject *self, PyObject *Py_UNUSED(ignored))
 static PyObject *
 memoryview_setstate(PyMemoryViewObject *self, PyObject *state)
 {
-    // state is the cap dict
+    fprintf(stderr, "[DEBUG] __setstate__ called\n");
+
     PyObject *cap = state;
     if (!PyDict_Check(cap)) {
         PyErr_SetString(PyExc_TypeError, "invalid state for memoryview");
         return NULL;
     }
-    // Use your existing cap-to-memoryview loader
+    
+    fprintf(stderr, "[DEBUG] Cap dict OK\n");
+
+    // // Use your existing cap-to-memoryview loader
     if (apply_remote_setup(self, cap) < 0) {  // implement this
         return NULL;
     }
@@ -1966,6 +1979,48 @@ err_format:
     return NULL;
 }
 
+static PyObject *
+unpack_single_remote(PyMemoryViewObject *self, cc_dcap cap, const char *fmt)
+{
+    unsigned long lu;
+    long ld;
+    unsigned char uc;
+    double d;
+    uint8_t byte;
+
+#if PY_LITTLE_ENDIAN
+    int endian = 1;
+#else
+    int endian = 0;
+#endif
+
+    if (!IS_BYTE_FORMAT(fmt)) {
+        PyErr_Format(PyExc_NotImplementedError,
+            "remote memoryview: format '%s' not supported", fmt);
+        return NULL;
+    }
+
+    switch (fmt[0]) {
+        case 'B':  // Unsigned char
+            byte = cc_isa_load_CR0_read_i8_data(cap);
+            return PyLong_FromUnsignedLong((unsigned long)byte);
+
+        case 'b':  // Signed char
+            byte = cc_isa_load_CR0_read_i8_data(cap);
+            return PyLong_FromLong((signed char)byte);
+
+        case 'c':  // Char -> bytes
+            byte = cc_isa_load_CR0_read_i8_data(cap);
+            return PyBytes_FromStringAndSize((char *)&byte, 1);
+
+        default:
+            PyErr_Format(PyExc_NotImplementedError,
+                "remote memoryview: format '%s' not yet implemented", fmt);
+            return NULL;
+    }
+}
+
+
 #define PACK_SINGLE(ptr, src, type) \
     do {                                     \
         type x;                              \
@@ -2293,6 +2348,45 @@ tolist_base(PyMemoryViewObject *self, const char *ptr, const Py_ssize_t *shape,
     return lst;
 }
 
+
+
+static PyObject *
+tolist_base_remote(PyMemoryViewObject *self, cc_dcap cap, const Py_ssize_t *shape,
+                   const Py_ssize_t *strides, const char *fmt)
+{
+    PyObject *lst, *item;
+    Py_ssize_t i;
+
+    //fprintf(stderr, "[DEBUG] tolist_base_remote fmt='%s' first char='%c'\n", fmt, fmt[0]);
+
+    if (!IS_BYTE_FORMAT(fmt[0])) {
+        PyErr_Format(PyExc_NotImplementedError,
+            "remote memoryview: format '%s' not supported", fmt);
+        return NULL;
+    }
+
+    lst = PyList_New(shape[0]);
+    if (lst == NULL)
+        return NULL;
+
+    cc_dcap temp = cap;
+
+    for (i = 0; i < shape[0]; ++i) {
+        temp.offset = cap.offset + i * strides[0];
+
+        uint8_t byte = cc_isa_load_CR0_read_i8_data(temp);
+        item = PyLong_FromUnsignedLong(byte);
+        if (item == NULL) {
+            Py_DECREF(lst);
+            return NULL;
+        }
+
+        PyList_SET_ITEM(lst, i, item);
+    }
+
+    return lst;
+}
+
 /* Unpack a multi-dimensional array into a nested list.
    Assumption: ndim >= 1. */
 static PyObject *
@@ -2329,6 +2423,41 @@ tolist_rec(PyMemoryViewObject *self, const char *ptr, Py_ssize_t ndim, const Py_
     return lst;
 }
 
+static PyObject *
+tolist_rec_remote(PyMemoryViewObject *self, cc_dcap base_cap, Py_ssize_t ndim, const Py_ssize_t *shape,
+                  const Py_ssize_t *strides, const char *fmt)
+{
+    assert(ndim >= 1);
+    assert(shape != NULL);
+    assert(strides != NULL);
+
+    PyObject *lst = PyList_New(shape[0]);
+    if (lst == NULL)
+        return NULL;
+
+    for (Py_ssize_t i = 0; i < shape[0]; i++) {
+        cc_dcap offset_cap = base_cap;
+        offset_cap.offset += i * strides[0];
+
+        PyObject *item;
+        if (ndim == 1) {
+            item = unpack_single_remote(self, offset_cap, fmt);
+        } else {
+            item = tolist_rec_remote(self, offset_cap, ndim - 1,
+                                     shape + 1, strides + 1, fmt);
+        }
+
+        if (item == NULL) {
+            Py_DECREF(lst);
+            return NULL;
+        }
+
+        PyList_SET_ITEM(lst, i, item);
+    }
+
+    return lst;
+}
+
 /* Return a list representation of the memoryview. Currently only buffers
    with native format strings are supported. */
 /*[clinic input]
@@ -2336,7 +2465,6 @@ memoryview.tolist
 
 Return the data in the buffer as a list of elements.
 [clinic start generated code]*/
-
 static PyObject *
 memoryview_tolist_impl(PyMemoryViewObject *self)
 /*[clinic end generated code: output=a6cda89214fd5a1b input=21e7d0c1860b211a]*/
@@ -2344,25 +2472,43 @@ memoryview_tolist_impl(PyMemoryViewObject *self)
     const Py_buffer *view = &self->view;
     const char *fmt;
 
-    CHECK_RELEASED(self);
+    if (view->is_remote != 1) 
+        CHECK_RELEASED(self);
 
     fmt = adjust_fmt(view);
     if (fmt == NULL)
         return NULL;
-    if (view->ndim == 0) {
-        return unpack_single(self, view->buf, fmt);
-    }
-    else if (view->ndim == 1) {
-        return tolist_base(self, view->buf, view->shape,
-                           view->strides, view->suboffsets,
-                           fmt);
-    }
-    else {
-        return tolist_rec(self, view->buf, view->ndim, view->shape,
-                          view->strides, view->suboffsets,
-                          fmt);
+
+    if (view->is_remote == 1) {
+        if (view->ndim == 0) {
+            // Read a single item via remote mechanism
+            cc_dcap cap = view->cap;
+            return unpack_single_remote(self, cap, fmt);
+        } else if (view->ndim == 1) {
+            return tolist_base_remote(self, view->cap, view->shape, view->strides, fmt);
+        } else {
+            PyErr_SetString(PyExc_NotImplementedError,
+                "multi-dimensional sub-views for remote meemoryview are not implemented");
+            return NULL;
+            //return tolist_rec_remote(self, view->cap, view->ndim, view->shape, view->strides, fmt);
+        }
+    } else {
+
+        if (view->ndim == 0) {
+            return unpack_single(self, view->buf, fmt);
+        } else if (view->ndim == 1) {
+            return tolist_base(self, view->buf, view->shape,
+                               view->strides, view->suboffsets,
+                               fmt);
+        } else {
+            return tolist_rec(self, view->buf, view->ndim, view->shape,
+                              view->strides, view->suboffsets,
+                              fmt);
+        }
     }
 }
+
+
 
 /*[clinic input]
 memoryview.tobytes
@@ -2810,6 +2956,10 @@ static int
 memory_ass_sub(PyMemoryViewObject *self, PyObject *key, PyObject *value)
 {
     Py_buffer *view = &(self->view);
+
+    fprintf(stderr, "[DEBUG ass_sub] is_remote=%d len=%zd buf=%p readonly=%d\n",
+        view->is_remote, view->len, view->buf, view->readonly);
+
     Py_buffer src;
     const char *fmt;
     char *ptr;
@@ -2851,6 +3001,26 @@ memory_ass_sub(PyMemoryViewObject *self, PyObject *key, PyObject *value)
         index = PyNumber_AsSsize_t(key, PyExc_IndexError);
         if (index == -1 && PyErr_Occurred())
             return -1;
+
+        if (view->is_remote==1) {
+            // Handle remote write via ISA
+            long val;
+            if (!PyLong_Check(value)) {
+                PyErr_SetString(PyExc_TypeError, "expected int for remote memory write");
+                return -1;
+            }
+            val = PyLong_AsLong(value);
+            if (val < 0 || val > 255) {
+                PyErr_SetString(PyExc_ValueError, "byte value out of range");
+                return -1;
+            }
+
+            cc_dcap cap = view->cap;
+            cap.offset += index;
+            cc_isa_load_CR0_write_i8_data(cap, (uint8_t)val);
+            return 0;
+        }
+
         ptr = ptr_from_index(view, index);
         if (ptr == NULL)
             return -1;
@@ -3236,15 +3406,23 @@ result:
 /**************************************************************************/
 /*                                Hash                                    */
 /**************************************************************************/
-
 static Py_hash_t
 memory_hash(PyMemoryViewObject *self)
 {
+ 
+
     if (self->hash == -1) {
         Py_buffer *view = &self->view;
+
+
+        fprintf(stderr, "[DEBUG hash] is_remote=%d len=%zd buf=%p readonly=%d format=%s\n",
+        view->is_remote, view->len, view->buf, view->readonly,
+        view->format ? view->format : "(null)");
+
+
         char *mem = view->buf;
-        Py_ssize_t ret;
         char fmt;
+        Py_ssize_t ret;
 
         CHECK_RELEASED_INT(self);
 
@@ -3253,34 +3431,52 @@ memory_hash(PyMemoryViewObject *self)
                 "cannot hash writable memoryview object");
             return -1;
         }
+
         ret = get_native_fmtchar(&fmt, view->format);
         if (ret < 0 || !IS_BYTE_FORMAT(fmt)) {
             PyErr_SetString(PyExc_ValueError,
                 "memoryview: hashing is restricted to formats 'B', 'b' or 'c'");
             return -1;
         }
-        if (view->obj != NULL && PyObject_Hash(view->obj) == -1) {
-            /* Keep the original error message */
-            return -1;
-        }
 
-        if (!MV_C_CONTIGUOUS(self->flags)) {
-            mem = PyMem_Malloc(view->len);
+        // For remote view, perform a copy via capability
+        if (view->is_remote==1) {
+            mem = PyMem_Malloc(view->cap.size);
             if (mem == NULL) {
                 PyErr_NoMemory();
                 return -1;
             }
-            if (buffer_to_contiguous(mem, view, 'C') < 0) {
+            if (!cc_isa_load_CR0_memcpy(mem, view->cap, view->cap.size)) {
                 PyMem_Free(mem);
+                PyErr_SetString(PyExc_RuntimeError,
+                    "failed to read remote memory for hashing");
                 return -1;
             }
-        }
-
-        /* Can't fail */
-        self->hash = _Py_HashBytes(mem, view->len);
-
-        if (mem != view->buf)
+            self->hash = _Py_HashBytes(mem, view->cap.size);
             PyMem_Free(mem);
+        }
+        else {
+            if (view->obj != NULL && PyObject_Hash(view->obj) == -1) {
+                return -1;
+            }
+
+            if (!MV_C_CONTIGUOUS(self->flags)) {
+                mem = PyMem_Malloc(view->len);
+                if (mem == NULL) {
+                    PyErr_NoMemory();
+                    return -1;
+                }
+                if (buffer_to_contiguous(mem, view, 'C') < 0) {
+                    PyMem_Free(mem);
+                    return -1;
+                }
+            }
+
+            self->hash = _Py_HashBytes(mem, view->len);
+
+            if (mem != view->buf)
+                PyMem_Free(mem);
+        }
     }
 
     return self->hash;
