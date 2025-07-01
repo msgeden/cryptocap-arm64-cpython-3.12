@@ -1026,7 +1026,7 @@ apply_remote_setup(PyMemoryViewObject *self, PyObject *cap_dict)
     cap.PT = PyLong_AsUnsignedLongLong(PyDict_GetItemString(cap_dict, "PT"));
     cap.MAC = PyLong_AsUnsignedLongLong(PyDict_GetItemString(cap_dict, "MAC"));
 
-    fprintf(stderr, "[DEBUG] apply_remote_setup: size=%d offset=%d\n", cap.size, cap.offset);
+    //fprintf(stderr, "[DEBUG] apply_remote_setup: size=%d offset=%d\n", cap.size, cap.offset);
 
 
     if (PyErr_Occurred())
@@ -1145,7 +1145,7 @@ memoryview_reduce(PyMemoryViewObject *self, PyObject *Py_UNUSED(ignored))
         "MAC", self->view.cap.MAC
     );
 
-    fprintf(stderr, "[DEBUG] __reduce__: size=%u, offset=%u\n", self->view.cap.size, self->view.cap.offset);
+    //fprintf(stderr, "[DEBUG] __reduce__: size=%u, offset=%u\n", self->view.cap.size, self->view.cap.offset);
 
     //no serialisation for local objects
     if (!cap) return NULL;
@@ -1156,7 +1156,7 @@ memoryview_reduce(PyMemoryViewObject *self, PyObject *Py_UNUSED(ignored))
 static PyObject *
 memoryview_setstate(PyMemoryViewObject *self, PyObject *state)
 {
-    fprintf(stderr, "[DEBUG] __setstate__ called\n");
+    //fprintf(stderr, "[DEBUG] __setstate__ called\n");
 
     PyObject *cap = state;
     if (!PyDict_Check(cap)) {
@@ -1164,7 +1164,7 @@ memoryview_setstate(PyMemoryViewObject *self, PyObject *state)
         return NULL;
     }
     
-    fprintf(stderr, "[DEBUG] Cap dict OK\n");
+    //fprintf(stderr, "[DEBUG] Cap dict OK\n");
 
     // // Use your existing cap-to-memoryview loader
     if (apply_remote_setup(self, cap) < 0) {  // implement this
@@ -2957,8 +2957,8 @@ memory_ass_sub(PyMemoryViewObject *self, PyObject *key, PyObject *value)
 {
     Py_buffer *view = &(self->view);
 
-    fprintf(stderr, "[DEBUG ass_sub] is_remote=%d len=%zd buf=%p readonly=%d\n",
-        view->is_remote, view->len, view->buf, view->readonly);
+    // fprintf(stderr, "[DEBUG ass_sub] is_remote=%d len=%zd buf=%p readonly=%d\n",
+    //     view->is_remote, view->len, view->buf, view->readonly);
 
     Py_buffer src;
     const char *fmt;
@@ -3415,9 +3415,9 @@ memory_hash(PyMemoryViewObject *self)
         Py_buffer *view = &self->view;
 
 
-        fprintf(stderr, "[DEBUG hash] is_remote=%d len=%zd buf=%p readonly=%d format=%s\n",
+        //fprintf(stderr, "[DEBUG hash] is_remote=%d len=%zd buf=%p readonly=%d format=%s\n",
         view->is_remote, view->len, view->buf, view->readonly,
-        view->format ? view->format : "(null)");
+        view->format ? view->format : "(null)";
 
 
         char *mem = view->buf;
