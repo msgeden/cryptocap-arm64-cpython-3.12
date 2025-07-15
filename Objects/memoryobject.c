@@ -2713,41 +2713,6 @@ memory_item(PyMemoryViewObject *self, Py_ssize_t index)
         if (view->is_remote==1) {
             struct cc_dcap temp = view->cap;
             temp.offset += index;
-            // Assume item size is 1 byte for now (uint8_t)
-            // fprintf(stderr,
-            //     "[DEBUG] memory_item:\n"
-            //     "  index        = %zd\n"
-            //     "  is_remote    = %d\n"
-            //     "  buf          = %p\n"
-            //     "  len          = %zd\n"
-            //     "  itemsize     = %zd\n"
-            //     "  readonly     = %d\n"
-            //     "  ndim         = %d\n"
-            //     "  format       = %s\n"
-            //     "  shape[0]     = %zd\n"
-            //     "  strides[0]   = %zd\n"
-            //     "  cap:\n"
-            //     "    perms_base = 0x%lx\n"
-            //     "    offset     = %u\n"
-            //     "    size       = %u\n"
-            //     "    PT         = 0x%lx\n"
-            //     "    MAC        = 0x%lx\n",
-            //     index,
-            //     view->is_remote,
-            //     view->buf,
-            //     view->len,
-            //     view->itemsize,
-            //     view->readonly,
-            //     view->ndim,
-            //     view->format ? view->format : "(null)",
-            //     view->shape ? view->shape[0] : -1,
-            //     view->strides ? view->strides[0] : -1,
-            //     view->cap.perms_base,
-            //     view->cap.offset,
-            //     view->cap.size,
-            //     view->cap.PT,
-            //     view->cap.MAC
-            // );
             //uint8_t val = 42;
             uint8_t val = cc_isa_load_CR0_read_i8_data(temp);
             return PyLong_FromUnsignedLong(val);
@@ -2892,10 +2857,99 @@ memory_subscript(PyMemoryViewObject *self, PyObject *key)
             //uint8_t val = 42;
             uint8_t val = cc_isa_load_CR0_read_i8_data(temp);
             return PyLong_FromUnsignedLong(val);
-        } else {
-            PyErr_SetString(PyExc_TypeError, "Remote memoryview only supports integer indexing");
-            return NULL;
+        } 
+        
+        // Handle slicing
+        if (PySlice_Check(key)) {
+            if (view->ndim != 1) {
+                PyErr_SetString(PyExc_NotImplementedError, "remote slicing only supported for 1D views");
+                return NULL;
+            }
+
+            Py_ssize_t start, stop, step, slicelength;
+            if (PySlice_Unpack(key, &start, &stop, &step) < 0)
+                return NULL;
+
+            slicelength = PySlice_AdjustIndices(view->shape[0], &start, &stop, step);
+            if (slicelength < 0) slicelength = 0;
+
+            if (step != 1) {
+                PyErr_SetString(PyExc_NotImplementedError, "remote slicing only supports step=1");
+                return NULL;
+            }
+
+            PyMemoryViewObject *sliced = PyObject_New(PyMemoryViewObject, &PyMemoryView_Type);
+            if (sliced == NULL) {
+                return NULL;
+            }
+
+            memcpy(sliced, self, sizeof(PyMemoryViewObject));
+            Py_INCREF(view->obj);  // Ensure base object is retained
+            sliced->view.obj = view->obj;
+
+            // Update shape and cap
+            sliced->view.shape = PyMem_Malloc(sizeof(Py_ssize_t));
+            if (sliced->view.shape == NULL) {
+                Py_DECREF(sliced);
+                PyErr_NoMemory();
+                return NULL;
+            }
+            sliced->view.shape[0] = slicelength;
+
+            sliced->view.strides = PyMem_Malloc(sizeof(Py_ssize_t));
+            if (sliced->view.strides == NULL) {
+                PyMem_Free(sliced->view.shape);
+                Py_DECREF(sliced);
+                PyErr_NoMemory();
+                return NULL;
+            }
+            sliced->view.strides[0] = view->strides[0];
+
+            sliced->view.cap.offset = view->cap.offset + (start * view->itemsize);
+            sliced->view.len = slicelength * view->itemsize;
+            return (PyObject *)sliced;
+            // // Allocate a new PyMemoryViewObject without mbuf structure
+            // PyMemoryViewObject *sliced = PyObject_GC_New(PyMemoryViewObject, &PyMemoryView_Type);
+            // if (!sliced) return NULL;
+            // memset(sliced, 0, sizeof(PyMemoryViewObject));
+            // _Py_NewReference((PyObject*)sliced);
+
+            // // Copy & adjust view buffer
+            // Py_buffer *sv = &sliced->view;
+            // sv->buf = NULL;  // no local buffer
+            // sv->obj = (PyObject*)NULL;
+            // sv->readonly = view->readonly;
+            // sv->ndim = 1;
+            // sv->itemsize = view->itemsize;
+            // sv->format = view->format;
+            // sv->shape = PyMem_Malloc(sizeof(Py_ssize_t));
+            // sv->strides = PyMem_Malloc(sizeof(Py_ssize_t));
+            // sv->suboffsets = NULL;
+            // if (!sv->shape || !sv->strides) {
+            //     Py_DECREF(sliced);
+            //     PyErr_NoMemory();
+            //     return NULL;
+            // }
+
+            // sv->shape[0] = slicelength;
+            // sv->strides[0] = 1;
+            // sv->len = slicelength * sv->itemsize;
+
+            // // Setup remote capability
+            // sv->cap = view->cap;
+            // sv->cap.offset += start;
+
+            // // Initialize flags
+            // sliced->exports = 1;
+            // sliced->flags = self->flags;
+
+            // _PyObject_GC_TRACK(sliced);
+            // return (PyObject *)sliced;
         }
+
+        PyErr_SetString(PyExc_TypeError, "Remote memoryview only supports integer indexing");
+        return NULL;
+        
     }
 
     // === Local fallback (normal memoryview) ===
@@ -3726,6 +3780,19 @@ memory_iter(PyObject *seq)
         PyErr_BadInternalCall();
         return NULL;
     }
+
+    // PyMemoryViewObject *mv = (PyMemoryViewObject *)seq;
+
+    // if (mv->view.is_remote == 1) {
+    //     PyRemoteMemIterObject *it = PyObject_GC_New(PyRemoteMemIterObject, &PyRemoteMemoryIter_Type);
+    //     if (!it) return NULL;
+    //     it->cap = mv->view.cap;
+    //     it->it_length = mv->view.shape[0];
+    //     it->it_index = 0;
+    //     _PyObject_GC_TRACK(it);
+    //     return (PyObject *)it;
+    // }
+
     CHECK_RELEASED(seq);
     PyMemoryViewObject *obj = (PyMemoryViewObject *)seq;
     int ndims = obj->view.ndim;

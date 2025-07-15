@@ -96,6 +96,7 @@ void cc_isa_write_i8_via_CR0(uint8_t data) {
 
 uint8_t cc_isa_load_CR0_read_i8_data(cc_dcap cap) {
     uint8_t data = 0;
+    //return 42;
     cc_isa_load_ver_cap_to_CR0(&cap);
     __asm__ volatile (
         ".word 0x02200d20\n\t"
