@@ -3773,6 +3773,50 @@ memoryiter_next(memoryiterobject *it)
     return NULL;
 }
 
+typedef struct {
+    PyObject_HEAD
+    cc_dcap cap;
+    Py_ssize_t it_index;
+    Py_ssize_t it_length;
+} PyRemoteMemIterObject;
+
+static PyObject *
+memoryiter_next_remote(PyRemoteMemIterObject *it)
+{
+    if (it->it_index >= it->it_length)
+        return NULL;
+
+    cc_dcap temp = it->cap;
+    temp.offset += it->it_index++;
+
+    uint8_t val = cc_isa_load_CR0_read_i8_data(temp);
+    return PyLong_FromUnsignedLong(val);
+}
+
+static void
+memoryiter_remote_dealloc(PyRemoteMemIterObject *it)
+{
+    _PyObject_GC_UNTRACK(it);
+    PyObject_GC_Del(it);
+}
+
+static int
+memoryiter_remote_traverse(PyRemoteMemIterObject *it, visitproc visit, void *arg)
+{
+    return 0;
+}
+
+PyTypeObject PyRemoteMemoryIter_Type = {
+    PyVarObject_HEAD_INIT(&PyType_Type, 0)
+    .tp_name = "remote_memory_iterator",
+    .tp_basicsize = sizeof(PyRemoteMemIterObject),
+    .tp_dealloc = (destructor)memoryiter_remote_dealloc,
+    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,
+    .tp_traverse = (traverseproc)memoryiter_remote_traverse,
+    .tp_iter = PyObject_SelfIter,
+    .tp_iternext = (iternextfunc)memoryiter_next_remote,
+};
+
 static PyObject *
 memory_iter(PyObject *seq)
 {
@@ -3781,17 +3825,17 @@ memory_iter(PyObject *seq)
         return NULL;
     }
 
-    // PyMemoryViewObject *mv = (PyMemoryViewObject *)seq;
+    PyMemoryViewObject *mv = (PyMemoryViewObject *)seq;
 
-    // if (mv->view.is_remote == 1) {
-    //     PyRemoteMemIterObject *it = PyObject_GC_New(PyRemoteMemIterObject, &PyRemoteMemoryIter_Type);
-    //     if (!it) return NULL;
-    //     it->cap = mv->view.cap;
-    //     it->it_length = mv->view.shape[0];
-    //     it->it_index = 0;
-    //     _PyObject_GC_TRACK(it);
-    //     return (PyObject *)it;
-    // }
+    if (mv->view.is_remote == 1) {
+        PyRemoteMemIterObject *it = PyObject_GC_New(PyRemoteMemIterObject, &PyRemoteMemoryIter_Type);
+        if (!it) return NULL;
+        it->cap = mv->view.cap;
+        it->it_length = mv->view.shape[0];
+        it->it_index = 0;
+        _PyObject_GC_TRACK(it);
+        return (PyObject *)it;
+    }
 
     CHECK_RELEASED(seq);
     PyMemoryViewObject *obj = (PyMemoryViewObject *)seq;
